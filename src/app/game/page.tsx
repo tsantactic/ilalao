@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState, useRef } from "react";
+import { startEnemyBot } from "../../lib/enemyBot";
 import { useRouter, useSearchParams } from "next/navigation";
 
 type SavedGame = { id: number; name: string; owner: string; data: any; createdAt: string };
@@ -25,9 +26,10 @@ export default function GamePage() {
   const MINIMAP_SIZE = 220;
   const MINIMAP_PADDING = 12;
   const miniCanvasRef = useRef<HTMLCanvasElement | null>(null);
-  const NUM_SEGMENTS = 9;
+  const NUM_SEGMENTS = 2;
   const [captureSegments, setCaptureSegments] = useState<Array<null | "player" | "enemy">>(() => Array(NUM_SEGMENTS).fill(null));
   const [gameWinner, setGameWinner] = useState<null | "player" | "enemy">(null);
+  const [controlPct, setControlPct] = useState<{ player: number; enemy: number }>({ player: 0, enemy: 0 });
   const [trees, setTrees] = useState<Array<{ x: number; y: number }>>([]);
   // structures placed on the map
   const [structures, setStructures] = useState<Array<{ type: string; x: number; y: number; comment?: string; hp?: number; owner?: string }>>([]);
@@ -36,8 +38,12 @@ export default function GamePage() {
   const [projectiles, setProjectiles] = useState<Array<{ id: number; kind: "missile" | "nuke" | "bullet"; fromX: number; fromY: number; toX: number; toY: number; startTime: number; duration: number }>>([]);
   const [explosions, setExplosions] = useState<Array<{ id: number; x: number; y: number; radius: number; start: number }>>([]);
   const [weaponsStock, setWeaponsStock] = useState<{ missile: number; nuke: number }>({ missile: 0, nuke: 0 });
+  const [lastLauncherIndex, setLastLauncherIndex] = useState<number | null>(null);
   const missileDamage = 20;
   const nukeDamage = 120;
+  const bulletDamage = 12;
+  const MISSILE_TRUCK_RANGE = 300;
+  const MAISON_DEFENSE_RANGE = 360;
   // selection rectangle state (canvas pixel coords)
   const [isSelecting, setIsSelecting] = useState(false);
   const selectionStart = useRef<{ x: number; y: number } | null>(null);
@@ -394,6 +400,32 @@ export default function GamePage() {
       }
     }
     // draw projectiles
+    // draw firing zones for defenses and missile trucks
+    for (const s of structures) {
+      if (s.type === "maison_defense") {
+        const r = MAISON_DEFENSE_RANGE;
+        ctx.beginPath();
+        ctx.fillStyle = "rgba(59,130,246,0.06)"; // blueish fill
+        ctx.strokeStyle = "rgba(59,130,246,0.28)";
+        ctx.lineWidth = 1;
+        ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+    for (const t of troops) {
+      if (t.type === "missile_truck") {
+        const r = MISSILE_TRUCK_RANGE;
+        ctx.beginPath();
+        ctx.fillStyle = "rgba(59,130,246,0.04)";
+        ctx.strokeStyle = "rgba(59,130,246,0.22)";
+        ctx.lineWidth = 1;
+        ctx.arc(t.x, t.y, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
     for (const p of projectiles) {
       const now = performance.now();
       const t = Math.min(1, (now - p.startTime) / p.duration);
@@ -587,7 +619,7 @@ export default function GamePage() {
             setTrees(generateTrees(Number(s)));
                 setGameName(d.game.name || "");
                 // load structures if present
-                setStructures((d.game.data?.structures || []).map((it: any) => ({ hp: 100, ...it })));
+                setStructures((d.game.data?.structures || []).map((it: any) => ({ hp: 100, weapons: (it.weapons || {}), ...it })));
                 // load resources/workers/troops if present
                 if (d.game.data?.resources) setResources(d.game.data.resources);
                 if (d.game.data?.workers) setWorkers(d.game.data.workers);
@@ -604,7 +636,7 @@ export default function GamePage() {
       setStructures((s) => {
         const hasEnemy = s.find((z) => z.type === "maison_enemy");
         if (hasEnemy) return s;
-        return [...s, { type: "maison_enemy", x: VIRTUAL_WIDTH - 220, y: VIRTUAL_HEIGHT - 220, comment: "Base ennemie", hp: 150, owner: "enemy" } as any];
+        return [...s, { type: "maison_enemy", x: VIRTUAL_WIDTH - 220, y: VIRTUAL_HEIGHT - 220, comment: "Base ennemie", hp: 150, owner: "enemy", weapons: {} } as any];
       });
       // if no name provided, prompt user to enter a name after clicking Jouer from home
       setShowNamePrompt(true);
@@ -792,6 +824,9 @@ export default function GamePage() {
           for (let i = 0; i < troops.length; i++) {
             const t = troops[i];
             if ((t as any).owner === "enemy") continue;
+            // skip troops that overlap a structure
+            const overlapping = structures.some((s) => Math.hypot(s.x - t.x, s.y - t.y) < 36);
+            if (overlapping) continue;
             if (t.x >= worldRect.x && t.x <= worldRect.x + worldRect.w && t.y >= worldRect.y && t.y <= worldRect.y + worldRect.h) selected.push(t.id);
           }
           setSelectedTroopIds(selected);
@@ -858,23 +893,51 @@ export default function GamePage() {
         const targetY = worldY;
         const pendingId = Date.now() + Math.floor(Math.random() * 9999);
         const timerId = window.setTimeout(() => {
-          // find a launcher structure of the right type (nearest)
+          // find a launcher structure of the right type (prefer last purchased)
           const launcherType = kind === "nuke" ? "maison_nucleaire" : "maison_missile";
-          let launcher = structures.find((s) => s.type === launcherType && (s as any).owner !== "enemy");
-          if (!launcher) {
-            // fallback: use center of map
-            launcher = { x: VIRTUAL_WIDTH / 2, y: VIRTUAL_HEIGHT / 2, type: "fallback" } as any;
+          let launcherIndex = -1;
+          if (lastLauncherIndex !== null) {
+            const s = structures[lastLauncherIndex];
+            if (s && s.type === launcherType && (s as any).owner !== "enemy" && (s.weapons?.[kind] || 0) > 0) launcherIndex = lastLauncherIndex;
+          }
+          if (launcherIndex === -1) {
+            launcherIndex = structures.findIndex((s) => s.type === launcherType && (s as any).owner !== "enemy" && (s.weapons?.[kind] || 0) > 0);
+          }
+          let fromX = VIRTUAL_WIDTH / 2;
+          let fromY = VIRTUAL_HEIGHT / 2;
+          if (launcherIndex >= 0) {
+            const s = structures[launcherIndex];
+            fromX = s.x;
+            fromY = s.y;
+          } else {
+            // fallback to any launcher (even without explicit ammo) or center
+            const launcher = structures.find((s) => s.type === launcherType && (s as any).owner !== "enemy");
+            if (launcher) {
+              fromX = launcher.x;
+              fromY = launcher.y;
+            }
           }
           const now = performance.now();
           const duration = kind === "nuke" ? 3000 : 2000;
           const id = Date.now() + Math.floor(Math.random() * 999);
-          setProjectiles((ps) => [...ps, { id, kind, fromX: launcher!.x, fromY: launcher!.y, toX: targetX, toY: targetY, startTime: now, duration }]);
+          // detect if the player clicked on a structure
+          const toStructureIndex = structures.findIndex((s) => Math.hypot(s.x - targetX, s.y - targetY) < 36);
+          // mark launcher visual fire
+          if (launcherIndex >= 0) {
+            setStructures((prev) => prev.map((s, i) => (i === launcherIndex ? { ...s, lastFired: now } : s)));
+          }
+          setProjectiles((ps) => [...ps, { id, kind, fromX, fromY, toX: targetX, toY: targetY, startTime: now, duration, fromStructureIndex: launcherIndex >= 0 ? launcherIndex : undefined, toStructureIndex: toStructureIndex >= 0 ? toStructureIndex : undefined }]);
           // remove this pending entry
           setWeaponPendings((prev) => prev.filter((p) => p.id !== pendingId));
           setStatus(kind === "nuke" ? "Bombe lancée" : "Missile lancé");
         }, 8000) as unknown as number;
-        // decrement stock now that we scheduled the launch
-        setWeaponsStock((w) => ({ ...w, [kind]: Math.max(0, (w as any)[kind] - 1) }));
+        // decrement stock now that we scheduled the launch: prefer structure-local stock
+        if (selectedStructureIndex !== null && structures[selectedStructureIndex]?.type === (weaponTargetMode.kind === "nuke" ? "maison_nucleaire" : "maison_missile")) {
+          const idx = selectedStructureIndex;
+          setStructures((prev) => prev.map((s, i) => (i === idx ? { ...s, weapons: { ...(s.weapons || {}), [kind]: Math.max(0, (s.weapons?.[kind] || 0) - 1) } } : s)));
+        } else {
+          setWeaponsStock((w) => ({ ...w, [kind]: Math.max(0, (w as any)[kind] - 1) }));
+        }
         // add pending entry
         setWeaponPendings((prev) => [...prev, { id: pendingId, kind, target: { x: targetX, y: targetY }, timerId }]);
         setWeaponTargetMode(null); // clear targeting after scheduling
@@ -916,7 +979,12 @@ export default function GamePage() {
     }
 
     // if clicking on a troop -> either order selected troops to target that troop, or select it
-    const troopIdx = troops.findIndex((t) => (t as any).owner !== "enemy" && Math.hypot(t.x - worldX, t.y - worldY) < 12);
+    const troopIdx = troops.findIndex((t) => {
+      if ((t as any).owner === "enemy") return false;
+      // ignore troops overlapping structures
+      if (structures.some((s) => Math.hypot(s.x - t.x, s.y - t.y) < 36)) return false;
+      return Math.hypot(t.x - worldX, t.y - worldY) < 12;
+    });
     if (troopIdx >= 0) {
       const clickedTid = troops[troopIdx].id;
       // if we have other selected troops, treat this as an order: attack/heal that troop
@@ -968,7 +1036,9 @@ export default function GamePage() {
       }
       setStructures((s) => {
         const idx = s.length;
-        const next = [...s, { type: place.type, x: place.x, y: place.y, hp: 100, owner: "player" }];
+        const base = { type: place.type, x: place.x, y: place.y, hp: 100, owner: "player" } as any;
+        if (place.type === "maison_missile" || place.type === "maison_nucleaire") base.weapons = {};
+        const next = [...s, base];
         // select the newly placed structure (deferred to next tick)
         setTimeout(() => setSelectedStructureIndex(idx), 0);
         return next;
@@ -1000,6 +1070,7 @@ export default function GamePage() {
           const idp = Date.now() + Math.floor(Math.random() * 999);
           const duration = 2000;
           setProjectiles((ps) => [...ps, { id: idp, kind: "missile", fromX: truck.x, fromY: truck.y, toX: worldX, toY: worldY, startTime: now, duration }]);
+          setTroops((ts) => ts.map((t) => (t.id === truck.id ? { ...t, lastFired: now } : t)));
           setStatus("Missile lancé depuis camion");
           return;
         }
@@ -1078,8 +1149,19 @@ export default function GamePage() {
             const speed = troopStats[tr.type]?.speed ?? 4;
             if (dist > 4) {
               const step = Math.min(speed, dist);
-              tr.x += (dx / dist) * step;
-              tr.y += (dy / dist) * step;
+              const nextX = tr.x + (dx / dist) * step;
+              const nextY = tr.y + (dy / dist) * step;
+              // prevent missile truck from entering structures
+              if (tr.type === "missile_truck") {
+                const coll = structures.find((ss) => Math.hypot(ss.x - nextX, ss.y - nextY) < 36);
+                if (!coll) {
+                  tr.x = nextX;
+                  tr.y = nextY;
+                }
+              } else {
+                tr.x = nextX;
+                tr.y = nextY;
+              }
             } else {
               // reached
               // if drone reached an injured unit, heal
@@ -1115,8 +1197,18 @@ export default function GamePage() {
             const speed = troopStats[tr.type]?.speed ?? 4;
             if (dist > 40) {
               const step = Math.min(speed, dist);
-              tr.x += (dx / dist) * step;
-              tr.y += (dy / dist) * step;
+              const nextX = tr.x + (dx / dist) * step;
+              const nextY = tr.y + (dy / dist) * step;
+              if (tr.type === "missile_truck") {
+                const coll = structures.find((ss) => Math.hypot(ss.x - nextX, ss.y - nextY) < 36);
+                if (!coll) {
+                  tr.x = nextX;
+                  tr.y = nextY;
+                }
+              } else {
+                tr.x = nextX;
+                tr.y = nextY;
+              }
             } else {
               // attack structure: use troop damage stat (drones heal instead)
               if (tr.type === "drone") {
@@ -1156,8 +1248,18 @@ export default function GamePage() {
             const speed2 = troopStats[tr.type]?.speed ?? 4;
             if (dist2 > 20) {
               const step = Math.min(speed2, dist2);
-              tr.x += (dx2 / dist2) * step;
-              tr.y += (dy2 / dist2) * step;
+              const nextX = tr.x + (dx2 / dist2) * step;
+              const nextY = tr.y + (dy2 / dist2) * step;
+              if (tr.type === "missile_truck") {
+                const coll = structures.find((ss) => Math.hypot(ss.x - nextX, ss.y - nextY) < 36);
+                if (!coll) {
+                  tr.x = nextX;
+                  tr.y = nextY;
+                }
+              } else {
+                tr.x = nextX;
+                tr.y = nextY;
+              }
             } else {
               // in range: drone heals, others damage
               if (tr.type === "drone") {
@@ -1194,7 +1296,11 @@ export default function GamePage() {
       }
       setResources((r) => ({ ...r, gold: r.gold - (price.gold || 0), iron: r.iron - (price.iron || 0), wood: r.wood - (price.wood || 0) }));
     }
-    setStructures((s) => [...s, { type: pendingPlace.type, x: pendingPlace.x, y: pendingPlace.y, comment, hp: 100, owner: "player" }]);
+    setStructures((s) => {
+      const base: any = { type: pendingPlace.type, x: pendingPlace.x, y: pendingPlace.y, comment, hp: 100, owner: "player" };
+      if (pendingPlace.type === "maison_missile" || pendingPlace.type === "maison_nucleaire") base.weapons = {};
+      return [...s, base];
+    });
     setStatus(`${pendingPlace.type} placée`);
     setPendingPlace(null);
     setShowCommentPrompt(false);
@@ -1225,8 +1331,30 @@ export default function GamePage() {
     const id = nextIds.current.troop++;
     const stats = troopStats[kind];
     // spawn slightly offset; give a short delay before deploy so unit 'forms' then moves a few meters
-    const spawnX = spawn.x + 20 + Math.floor(Math.random() * 12 - 6);
-    const spawnY = spawn.y + 10 + Math.floor(Math.random() * 12 - 6);
+    // try to spawn the troop at a free nearby location so it doesn't overlap a structure
+    const tryRadius = [20, 34, 48, 64, 80, 100];
+    let spawnX = spawn.x + 20 + Math.floor(Math.random() * 12 - 6);
+    let spawnY = spawn.y + 10 + Math.floor(Math.random() * 12 - 6);
+    const collidesWithStructure = (x: number, y: number) => structures.some((s) => Math.hypot(s.x - x, s.y - y) < 36);
+    if (collidesWithStructure(spawnX, spawnY)) {
+      let found = false;
+      for (const r of tryRadius) {
+        for (let a = 0; a < 12; a++) {
+          const ang = (a / 12) * Math.PI * 2;
+          const nx = Math.round(spawn.x + Math.cos(ang) * r);
+          const ny = Math.round(spawn.y + Math.sin(ang) * r + 8);
+          if (!collidesWithStructure(nx, ny)) {
+            spawnX = nx; spawnY = ny; found = true; break;
+          }
+        }
+        if (found) break;
+      }
+      // if still colliding, push it further away
+      if (collidesWithStructure(spawnX, spawnY)) {
+        spawnX = spawn.x + 120;
+        spawnY = spawn.y + 40;
+      }
+    }
     const t = { id, type: kind, x: spawnX, y: spawnY, hp: stats?.hp ?? 100, owner: "player" } as any;
     setTroops((ts) => [...ts, t]);
     setStatus(`${kind} recruté`);
@@ -1245,7 +1373,16 @@ export default function GamePage() {
     const c = costs[kind];
     if (resources.gold < c.gold || resources.iron < c.iron) return setStatus("Pas assez de minerais");
     setResources((r) => ({ ...r, gold: r.gold - c.gold, iron: r.iron - c.iron }));
-    // add to stock instead of launching immediately
+    // if a launcher is selected (maison_missile or maison_nucleaire), attach ammo to that structure
+    const launcherType = kind === "nuke" ? "maison_nucleaire" : "maison_missile";
+    if (selectedStructureIndex !== null && structures[selectedStructureIndex]?.type === launcherType) {
+      const idx = selectedStructureIndex;
+      setStructures((prev) => prev.map((s, i) => (i === idx ? { ...s, weapons: { ...(s.weapons || {}), [kind]: (s.weapons?.[kind] || 0) + 1 } } : s)));
+      setLastLauncherIndex(idx);
+      setStatus(kind === "nuke" ? "Bombe stockée dans la maison sélectionnée" : "Missile stocké dans la maison sélectionnée");
+      return;
+    }
+    // otherwise add to global stock
     setWeaponsStock((w) => ({ ...w, [kind]: (w as any)[kind] + 1 }));
     setStatus(kind === "nuke" ? "Bombe stockée" : "Missile stocké");
   }
@@ -1281,17 +1418,64 @@ export default function GamePage() {
     let raf = 0;
     function step() {
       const now = performance.now();
-      // update projectiles: remove finished and create explosions
+      // update projectiles: handle mid-air collisions, early impacts and final impacts
       setProjectiles((prev) => {
         const out: typeof prev = [];
-        for (const p of prev) {
+        const positions = prev.map((p) => {
           const t = (now - p.startTime) / p.duration;
-          if (t >= 1) {
-            // missiles and nukes apply AoE damage; bullets are visual-only
+          const clamped = Math.min(1, Math.max(0, t));
+          const x = p.fromX + (p.toX - p.fromX) * clamped;
+          const y = p.fromY + (p.toY - p.fromY) * clamped;
+          return { p, t: clamped, x, y };
+        });
+        const removed = new Set<number>();
+
+        // projectile-projectile collisions
+        for (let i = 0; i < positions.length; i++) {
+          const a = positions[i];
+          if (removed.has(a.p.id)) continue;
+          for (let j = i + 1; j < positions.length; j++) {
+            const b = positions[j];
+            if (removed.has(b.p.id)) continue;
+            const dx = a.x - b.x;
+            const dy = a.y - b.y;
+            const d = Math.hypot(dx, dy);
+            const thresh = 16; // collision threshold
+            if (d < thresh) {
+              // midair explosion
+              setExplosions((ex) => [...ex, { id: Date.now() + Math.random(), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, radius: 48, start: now }]);
+              // apply damage near collision point
+              const cx = (a.x + b.x) / 2;
+              const cy = (a.y + b.y) / 2;
+              setStructures((prevS) => {
+                const outS = prevS.map((s) => ({ ...s }));
+                for (let k = outS.length - 1; k >= 0; k--) {
+                  const s = outS[k];
+                  const dd = Math.hypot(s.x - cx, s.y - cy);
+                  if (dd <= 48) outS[k].hp = Math.max(0, (outS[k].hp ?? 100) - missileDamage);
+                }
+                return outS.filter((s) => (s.hp ?? 100) > 0);
+              });
+              setTroops((prevT) => prevT.map((t2) => {
+                const dd = Math.hypot(t2.x - cx, t2.y - cy);
+                if (dd <= 48) return { ...t2, hp: Math.max(0, t2.hp - missileDamage) };
+                return t2;
+              }).filter((t2) => t2.hp > 0));
+              removed.add(a.p.id);
+              removed.add(b.p.id);
+            }
+          }
+        }
+
+        // check per-projectile interactions
+        for (const pos of positions) {
+          const p = pos.p;
+          if (removed.has(p.id)) continue;
+          // final impact
+          if (pos.t >= 1) {
             if (p.kind === "missile" || p.kind === "nuke") {
               const radius = p.kind === "nuke" ? 180 : 90;
               setExplosions((ex) => [...ex, { id: Date.now() + Math.random(), x: p.toX, y: p.toY, radius, start: now }]);
-              // apply damage only to structures within radius
               setStructures((prevS) => {
                 const outS = prevS.map((s) => ({ ...s }));
                 for (let i = outS.length - 1; i >= 0; i--) {
@@ -1303,21 +1487,85 @@ export default function GamePage() {
                 }
                 return outS.filter((s) => (s.hp ?? 100) > 0);
               });
-              // apply damage only to troops within radius
               setTroops((prevT) => prevT.map((t2) => {
                 const d2 = Math.hypot(t2.x - p.toX, t2.y - p.toY);
                 if (d2 <= (p.kind === "nuke" ? 180 : 90)) return { ...t2, hp: Math.max(0, t2.hp - (p.kind === "nuke" ? nukeDamage : missileDamage)) };
                 return t2;
               }).filter((t2) => t2.hp > 0));
             } else {
-              // bullet impact - small visual spark, no AoE damage
-              setExplosions((ex) => [...ex, { id: Date.now() + Math.random(), x: p.toX, y: p.toY, radius: 8, start: now }]);
+              // bullet impact: small damage to nearby troops/structures
+              const ix = p.toX;
+              const iy = p.toY;
+              setExplosions((ex) => [...ex, { id: Date.now() + Math.random(), x: ix, y: iy, radius: 12, start: now }]);
+              setTroops((prevT) => prevT.map((t2) => {
+                const d2 = Math.hypot(t2.x - ix, t2.y - iy);
+                if (d2 <= 16) return { ...t2, hp: Math.max(0, t2.hp - bulletDamage) };
+                return t2;
+              }).filter((t2) => t2.hp > 0));
+              setStructures((prevS) => prevS.map((s) => ({ ...s })).map((s) => s));
+              // small structure damage near impact
+              setStructures((prevS) => prevS.map((s) => {
+                const d = Math.hypot(s.x - ix, s.y - iy);
+                if (d <= 16) return { ...s, hp: Math.max(0, (s.hp ?? 100) - Math.round(bulletDamage / 2)) };
+                return s;
+              }).filter((s) => (s.hp ?? 100) > 0));
             }
+            removed.add(p.id);
             continue;
           }
+
+          // in-flight collision with structures
+          let impacted = false;
+          for (let i = 0; i < structures.length; i++) {
+            const s = structures[i];
+            const dd = Math.hypot(s.x - pos.x, s.y - pos.y);
+            if (dd <= 28) {
+              // impact
+              const ix = pos.x;
+              const iy = pos.y;
+              const radius = p.kind === "nuke" ? 180 : p.kind === "missile" ? 90 : 8;
+              setExplosions((ex) => [...ex, { id: Date.now() + Math.random(), x: ix, y: iy, radius, start: now }]);
+              setStructures((prevS) => {
+                const outS = prevS.map((zz) => ({ ...zz }));
+                for (let k = outS.length - 1; k >= 0; k--) {
+                  const ss = outS[k];
+                  const ddd = Math.hypot(ss.x - ix, ss.y - iy);
+                  if (ddd <= radius) outS[k].hp = Math.max(0, (outS[k].hp ?? 100) - (p.kind === "nuke" ? nukeDamage : missileDamage));
+                }
+                return outS.filter((s) => (s.hp ?? 100) > 0);
+              });
+              setTroops((prevT) => prevT.map((t2) => {
+                const ddd = Math.hypot(t2.x - ix, t2.y - iy);
+                if (ddd <= radius) return { ...t2, hp: Math.max(0, t2.hp - (p.kind === "nuke" ? nukeDamage : missileDamage)) };
+                return t2;
+              }).filter((t2) => t2.hp > 0));
+              removed.add(p.id);
+              impacted = true;
+              break;
+            }
+          }
+          if (impacted) continue;
+
+          // in-flight collision with troops
+          for (let i = 0; i < troops.length; i++) {
+            const ttroop = troops[i];
+            const dd = Math.hypot(ttroop.x - pos.x, ttroop.y - pos.y);
+            if (dd <= 12) {
+              // direct hit
+              setExplosions((ex) => [...ex, { id: Date.now() + Math.random(), x: pos.x, y: pos.y, radius: 24, start: now }]);
+              setTroops((prevT) => prevT.map((tt) => (tt.id === ttroop.id ? { ...tt, hp: Math.max(0, tt.hp - (p.kind === "nuke" ? nukeDamage : missileDamage)) } : tt)).filter((t2) => t2.hp > 0));
+              removed.add(p.id);
+              impacted = true;
+              break;
+            }
+          }
+          if (impacted) continue;
+
+          // otherwise keep flying
           out.push(p);
         }
-        return out;
+
+        return out.filter((p) => !removed.has(p.id));
       });
 
       // cull old explosions
@@ -1342,10 +1590,12 @@ export default function GamePage() {
           const sx = def.s.x;
           const sy = def.s.y;
           const cooldown = 700; // ms
-          const range = 220;
+          const range = MAISON_DEFENSE_RANGE;
           if ((def.s as any).lastFired && now - (def.s as any).lastFired < cooldown) continue;
           // find incoming threat near turret
           const threat = prev.find((p) => (p.kind === "missile" || p.kind === "nuke") && Math.hypot(p.toX - sx, p.toY - sy) <= range);
+          // also detect nearby enemy troops to engage
+          const nearbyTroop = troops.find((tr) => (tr as any).owner === "enemy" && Math.hypot(tr.x - sx, tr.y - sy) <= range);
           if (threat) {
             // mark turret fired (update structures)
             setStructures((ps) => ps.map((s, i) => (i === def.idx ? { ...s, lastFired: now } : s)));
@@ -1357,6 +1607,13 @@ export default function GamePage() {
             // neutralize incoming threat immediately (create small explosion)
             removedIds.add(threat.id);
             setExplosions((ex) => [...ex, { id: Date.now() + Math.random(), x: threat.toX, y: threat.toY, radius: 28, start: now }]);
+          } else if (nearbyTroop) {
+            // engage enemy troop with bullets
+            setStructures((ps) => ps.map((s, i) => (i === def.idx ? { ...s, lastFired: now } : s)));
+            for (let i = 0; i < 3; i++) {
+              const idp = Date.now() + Math.floor(Math.random() * 9999) + i;
+              added.push({ id: idp, kind: "bullet", fromX: sx, fromY: sy, toX: nearbyTroop.x + (i - 1) * 4, toY: nearbyTroop.y + (i - 1) * 4, startTime: now, duration: 220 + i * 40 });
+            }
           }
         }
         if (added.length === 0 && removedIds.size === 0) return prev;
@@ -1364,7 +1621,7 @@ export default function GamePage() {
       });
     }, 220);
     return () => clearInterval(t);
-  }, [projectiles, structures]);
+  }, [projectiles, structures, troops]);
 
   // ensure structures loaded from saved game have hp defaults
   useEffect(() => {
@@ -1458,7 +1715,7 @@ export default function GamePage() {
         // build near base
         const bx = base.x + (Math.random() * 160 - 80);
         const by = base.y + (Math.random() * 160 - 80);
-        setStructures((s) => [...s, { type: choice, x: Math.round(bx), y: Math.round(by), hp: 100, owner: "enemy" } as any]);
+          setStructures((s) => [...s, { type: choice, x: Math.round(bx), y: Math.round(by), hp: 100, owner: "enemy", weapons: {} } as any]);
         setEnemyResources((r) => ({ ...r, gold: r.gold - cost.gold, iron: r.iron - cost.iron }));
         pushLog(`Bot: construit ${choice}`);
       }
@@ -1570,62 +1827,47 @@ export default function GamePage() {
     return () => clearInterval(t);
   }, [troops, structures]);
 
-  // active enemy bot: try to contest weakest segment periodically
+  // control percentages (player vs enemy) computed from owned troops+structures
   useEffect(() => {
-    const ai = setInterval(() => {
-      if (gameWinner) return;
-      // find enemy base
-      const base = structures.find((s) => s.type === "maison_enemy" && (s as any).owner === "enemy");
-      if (!base) return;
-      // pick the segment where enemy presence is weakest relative to player
-      const segW = VIRTUAL_WIDTH / NUM_SEGMENTS;
-      let bestIdx = 0;
-      let bestNeed = -Infinity;
-      for (let i = 0; i < NUM_SEGMENTS; i++) {
-        const x0 = i * segW;
-        const x1 = x0 + segW;
-        const playerCount = troops.filter((tr) => (tr as any).owner !== "enemy" && tr.x >= x0 && tr.x < x1).length + structures.filter((s) => (s as any).owner !== "enemy" && s.x >= x0 && s.x < x1).length;
-        const enemyCount = troops.filter((tr) => (tr as any).owner === "enemy" && tr.x >= x0 && tr.x < x1).length + structures.filter((s) => (s as any).owner === "enemy" && s.x >= x0 && s.x < x1).length;
-        const need = playerCount - enemyCount;
-        if (need > bestNeed) {
-          bestNeed = need;
-          bestIdx = i;
-        }
-      }
-      const targetX = Math.round((bestIdx + 0.5) * segW);
-      const targetY = Math.round(VIRTUAL_HEIGHT / 2 + (Math.random() * 200 - 100));
-      // spawn a missile_truck if resources allow
-      const cost = { gold: 30, iron: 10 };
-      if (enemyResources.gold >= cost.gold && enemyResources.iron >= cost.iron) {
-        // spawn near base
-        const sx = base.x + Math.round(Math.random() * 60 - 30);
-        const sy = base.y + Math.round(Math.random() * 60 - 30);
-        const id = nextIds.current.troop++;
-        const stats = troopStats["missile_truck"];
-        const truck = { id, type: "missile_truck", x: sx, y: sy, hp: stats?.hp ?? 100, owner: "enemy" } as any;
-        setTroops((ts) => [...ts, truck]);
-        setEnemyResources((r) => ({ ...r, gold: r.gold - cost.gold, iron: r.iron - cost.iron }));
-        // order truck to move into segment
-        setTimeout(() => {
-          setTroops((ts) => ts.map((t) => (t.id === id ? { ...t, target: { x: targetX, y: targetY } } : t)));
-        }, 400);
-        pushLog(`Bot: envoie camion missile vers segment ${bestIdx}`);
+    const compute = () => {
+      const playerCount = troops.filter((t) => (t as any).owner !== "enemy").length + structures.filter((s) => (s as any).owner !== "enemy").length;
+      const enemyCount = troops.filter((t) => (t as any).owner === "enemy").length + structures.filter((s) => (s as any).owner === "enemy").length;
+      const total = playerCount + enemyCount;
+      if (total === 0) {
+        setControlPct({ player: 0, enemy: 0 });
       } else {
-        // if no resources, try to build mine or troop house
-        const choices = ["maison_mine", "maison_troupe"];
-        const choice = choices[Math.floor(Math.random() * choices.length)];
-        const cost2 = enemyStructureCosts[choice] || { gold: 0, iron: 0 };
-        if (enemyResources.gold >= cost2.gold && enemyResources.iron >= cost2.iron) {
-          const bx = base.x + (Math.random() * 160 - 80);
-          const by = base.y + (Math.random() * 160 - 80);
-          setStructures((s) => [...s, { type: choice, x: Math.round(bx), y: Math.round(by), hp: 100, owner: "enemy" } as any]);
-          setEnemyResources((r) => ({ ...r, gold: r.gold - cost2.gold, iron: r.iron - cost2.iron }));
-          pushLog(`Bot: construit ${choice}`);
-        }
+        setControlPct({ player: Math.round((playerCount / total) * 100), enemy: Math.round((enemyCount / total) * 100) });
       }
-    }, 7000);
-    return () => clearInterval(ai);
-  }, [structures, enemyResources, troops, gameWinner]);
+    };
+    compute();
+  }, [troops, structures]);
+
+  // enemy bot runs in a separate module; initialize it once and provide getters/setters
+  useEffect(() => {
+    const stop = startEnemyBot({
+      getStructures: () => structures,
+      getTroops: () => troops,
+      getEnemyResources: () => enemyResources,
+      getGameWinner: () => gameWinner,
+      setTroops: (u: any) => setTroops((prev) => (typeof u === "function" ? u(prev) : u)),
+      setStructures: (u: any) => setStructures((prev) => (typeof u === "function" ? u(prev) : u)),
+      setEnemyResources: (u: any) => setEnemyResources((prev) => (typeof u === "function" ? u(prev) : u)),
+      setProjectiles: (u: any) => setProjectiles((prev) => (typeof u === "function" ? u(prev) : u)),
+      pushLog,
+      nextIdsRef: nextIds,
+      VIRTUAL_WIDTH,
+      VIRTUAL_HEIGHT,
+    });
+    return () => stop();
+  }, []);
+
+  // compute player's total weapons (global stock + weapons stored in player's houses)
+  const playerStored = structures.filter((s) => (s as any).owner !== "enemy").reduce((acc, s: any) => ({
+    missile: acc.missile + ((s.weapons && s.weapons.missile) || 0),
+    nuke: acc.nuke + ((s.weapons && s.weapons.nuke) || 0),
+  }), { missile: 0, nuke: 0 });
+  const totalMissiles = (weaponsStock.missile || 0) + playerStored.missile;
+  const totalNukes = (weaponsStock.nuke || 0) + playerStored.nuke;
 
   return (
     <div className="min-h-screen">
@@ -1637,15 +1879,18 @@ export default function GamePage() {
             <div>💰 {Math.round(resources.gold)}</div>
             <div>⛏️ {Math.round(resources.iron)}</div>
             <div>⛽ {Math.round(resources.petrol)}</div>
-            </div>
-            <div className="coc-card px-3 py-2 flex items-center gap-3">
-              <div>🚀 {weaponsStock.missile}</div>
-              <div>💣 {weaponsStock.nuke}</div>
+          </div>
+          <div className="coc-card px-3 py-2 flex items-center gap-3">
+            <div className="text-sm">📊 Contrôle — Joueur {controlPct.player}% | Bot {controlPct.enemy}%</div>
+          </div>
+          <div className="coc-card px-3 py-2 flex items-center gap-3">
+              <div>🚀 {totalMissiles}</div>
+              <div>💣 {totalNukes}</div>
               <div className="flex gap-2 items-center">
                 <button
                   className="coc-btn-outline"
                   onClick={() => {
-                    if (weaponsStock.missile > 0) {
+                    if (totalMissiles > 0) {
                       setWeaponTargetMode({ kind: "missile" });
                       setStatus("Choisissez une cible pour missile");
                     } else setStatus("Aucun missile en stock");
@@ -1656,7 +1901,7 @@ export default function GamePage() {
                 <button
                   className="coc-btn-outline"
                   onClick={() => {
-                    if (weaponsStock.nuke > 0) {
+                    if (totalNukes > 0) {
                       setWeaponTargetMode({ kind: "nuke" });
                       setStatus("Choisissez une cible pour bombe");
                     } else setStatus("Aucune bombe en stock");
