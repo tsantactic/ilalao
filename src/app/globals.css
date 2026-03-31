@@ -1,0 +1,61 @@
+@import "tailwindcss";
+
+:root {
+  /* Clash of Clans inspired palette */
+  --coc-bg: #f2e6d0; /* parchment */
+  --coc-card: #fff6e6;
+  --coc-primary: #e0a800; /* gold */
+  --coc-accent: #ba2f2f; /* red */
+  --coc-dark: #3b2a22; /* dark brown */
+  --coc-text: #2b2219;
+
+  --background: var(--coc-bg);
+  --foreground: var(--coc-text);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Simple themed utilities */
+.coc-card {
+  background: var(--coc-card);
+  border: 2px solid rgba(0,0,0,0.08);
+  color: var(--coc-text);
+}
+.coc-btn {
+  background: var(--coc-primary);
+  color: white;
+  border-radius: 9999px;
+  padding: 0.5rem 1rem;
+  font-weight: 600;
+}
+.coc-btn-outline {
+  background: transparent;
+  color: var(--coc-dark);
+  border: 2px solid var(--coc-dark);
+  border-radius: 9999px;
+  padding: 0.5rem 1rem;
+  font-weight: 600;
+}
+
+.coc-heading {
+  color: var(--coc-dark);
+  text-shadow: 0 2px 0 rgba(0,0,0,0.05);
+}

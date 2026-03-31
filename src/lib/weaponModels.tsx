@@ -1,0 +1,140 @@
+import React from 'react';
+import { GroupProps } from '@react-three/fiber';
+
+// 1. Voiture porteur de missile (Missile Carrier)
+// Un véhicule blindé avec une rampe inclinée sur le dos.
+export const MissileCarrier = (props: GroupProps) => {
+  return (
+    <group {...props}>
+      {/* Châssis principal */}
+      <mesh position={[0, 0.5, 0]}>
+        <boxGeometry args={[2, 1, 4]} />
+        <meshStandardMaterial color="darkolivegreen" />
+      </mesh>
+
+      {/* Rampe de lancement (inclinée) */}
+      <mesh position={[0, 1.2, -0.5]} rotation={[0.5, 0, 0]}>
+        <boxGeometry args={[1, 0.5, 3]} />
+        <meshStandardMaterial color="gray" />
+      </mesh>
+
+      {/* Missile prêt à tirer */}
+      <mesh position={[0, 1.5, -0.5]} rotation={[0.5, 0, 0]}>
+        <cylinderGeometry args={[0.2, 0.2, 2.8, 16]} />
+        <meshStandardMaterial color="darkred" />
+      </mesh>
+
+      {/* Roues (3 de chaque côté) */}
+      {[-1, 1].map((x) =>
+        [-1.5, 0, 1.5].map((z) => (
+          <mesh key={`wheel-${x}-${z}`} position={[x * 1.1, 0.4, z]} rotation={[0, 0, Math.PI / 2]}>
+            <cylinderGeometry args={[0.4, 0.4, 0.2, 16]} />
+            <meshStandardMaterial color="black" />
+          </mesh>
+        ))
+      )}
+    </group>
+  );
+};
+
+// 2. Maison de port avion bombardier (Bomber Base / Aérodrome)
+// Une base de production avec une piste d'atterrissage et une tour de contrôle.
+export const BomberBase = (props: GroupProps) => {
+  return (
+    <group {...props}>
+      {/* Piste / Dalle en béton */}
+      <mesh position={[0, 0.25, 0]}>
+        <boxGeometry args={[8, 0.5, 8]} />
+        <meshStandardMaterial color="dimgray" />
+      </mesh>
+
+      {/* Tour de contrôle */}
+      <mesh position={[3, 2, -3]}>
+        <boxGeometry args={[1.5, 4, 1.5]} />
+        <meshStandardMaterial color="lightgray" />
+      </mesh>
+
+      {/* Dôme / Radar sur la tour */}
+      <mesh position={[3, 4.2, -3]}>
+        <sphereGeometry args={[0.8, 16, 16]} />
+        <meshStandardMaterial color="white" />
+      </mesh>
+    </group>
+  );
+};
+
+// 3. Avion bombardier (Bomber Plane)
+// Un avion massif avec de larges ailes.
+export const BomberPlane = (props: GroupProps) => {
+  return (
+    <group {...props}>
+      {/* Fuselage */}
+      <mesh position={[0, 0, 0]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.5, 0.5, 4, 16]} />
+        <meshStandardMaterial color="darkslategray" />
+      </mesh>
+
+      {/* Ailes (Envergure large) */}
+      <mesh position={[0, 0, 0]}>
+        <boxGeometry args={[6, 0.1, 1.5]} />
+        <meshStandardMaterial color="darkslategray" />
+      </mesh>
+
+      {/* Empennage (Queue de l'avion) */}
+      <mesh position={[0, 0.5, -1.8]}>
+        <boxGeometry args={[0.1, 1, 1]} />
+        <meshStandardMaterial color="darkslategray" />
+      </mesh>
+    </group>
+  );
+};
+
+// 4. Missile (Projectile en vol)
+// Profil fin et aérodynamique.
+export const Missile = (props: GroupProps) => {
+  return (
+    <group {...props}>
+      {/* Corps du missile */}
+      <mesh position={[0, 0, 0]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.15, 0.15, 2, 16]} />
+        <meshStandardMaterial color="white" />
+      </mesh>
+
+      {/* Ogive / Tête chercheuse */}
+      <mesh position={[0, 0, 1.1]} rotation={[Math.PI / 2, 0, 0]}>
+        <coneGeometry args={[0.15, 0.4, 16]} />
+        <meshStandardMaterial color="red" />
+      </mesh>
+    </group>
+  );
+};
+
+// 5. Bombe nucléaire (Nuke)
+// Projectile lourd, profil arrondi avec ailerons de stabilisation.
+export const NuclearBomb = (props: GroupProps) => {
+  return (
+    <group {...props}>
+      {/* Corps massif */}
+      <mesh position={[0, 0, 0]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.8, 0.8, 3, 32]} />
+        <meshStandardMaterial color="olive" />
+      </mesh>
+
+      {/* Tête arrondie typique des bombes lourdes */}
+      <mesh position={[0, 0, 1.5]}>
+        <sphereGeometry args={[0.8, 32, 32]} />
+        <meshStandardMaterial color="olive" />
+      </mesh>
+
+      {/* Ailerons arrières croisés */}
+      <mesh position={[0, 0, -1.2]}>
+        <boxGeometry args={[2.5, 0.1, 1]} />
+        <meshStandardMaterial color="darkgreen" />
+      </mesh>
+      <mesh position={[0, 0, -1.2]} rotation={[0, 0, Math.PI / 2]}>
+        <boxGeometry args={[2.5, 0.1, 1]} />
+        <meshStandardMaterial color="darkgreen" />
+      </mesh>
+    </group>
+  );
+};
